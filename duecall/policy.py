@@ -18,7 +18,8 @@ from decimal import Decimal
 PROMISE_MAX_DAYS = 14
 PLAN_MAX_INSTALLMENTS = 3
 PLAN_MIN_BALANCE = Decimal("50000")
-NAME_MATCH_THRESHOLD = 0.72
+NAME_MATCH_THRESHOLD = 0.88   # whole-phrase similarity (after alias normalisation)
+NAME_TOKEN_THRESHOLD = 0.8    # each company word must appear this closely in what was said
 MAX_VERIFY_ATTEMPTS = 2
 
 OUTCOMES = {

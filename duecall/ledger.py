@@ -8,6 +8,7 @@ a sentence the agent can say back to the customer.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -79,6 +80,16 @@ class Customer:
     currency: str
 
 
+_LEGAL_SUFFIXES = {"private", "pvt", "limited", "ltd", "llp", "inc", "co", "company"}
+# Common spellings of the same honorific, as STT renders them
+_NAME_ALIASES = {"sri": "shri", "shree": "shri", "sree": "shri", "shre": "shri"}
+
+
+def _name_tokens(text: str) -> list[str]:
+    words = re.findall(r"[a-z]+", text.lower())
+    return [_NAME_ALIASES.get(w, w) for w in words if w not in _LEGAL_SUFFIXES]
+
+
 def _d(s: str) -> date:
     return date.fromisoformat(s)
 
@@ -97,21 +108,22 @@ class Ledger:
     def match_company(self, customer_id: str, spoken_name: str) -> bool:
         """Identity check: does the name the person said match the account we called?
 
-        Speech-to-text mangles company names ("Shree Ganesh" -> "Shri Ganesh"), so
-        this is a fuzzy match, but against ONE known account, never a search across
-        all customers, so a caller cannot fish for someone else's balance.
+        Speech-to-text mangles company names ("Shree Ganesh" -> "Sri Ganesh"), and
+        people answer in sentences ("this is Rohit from Shri Ganesh Traders"), so a
+        match is either the whole phrase being close, or every word of the company
+        name turning up in what they said. It is checked against ONE known account,
+        never searched across customers, so a caller cannot fish for another balance.
         """
         cust = self.customer(customer_id)
         if not cust:
             return False
-
-        def norm(s: str) -> str:
-            s = s.lower()
-            for junk in (" private limited", " pvt ltd", " pvt. ltd.", " limited", " ltd", " llp", "."):
-                s = s.replace(junk, "")
-            return " ".join(s.split())
-
-        return SequenceMatcher(None, norm(cust.company), norm(spoken_name)).ratio() >= policy.NAME_MATCH_THRESHOLD
+        company, spoken = _name_tokens(cust.company), _name_tokens(spoken_name)
+        if not company or not spoken:
+            return False
+        if SequenceMatcher(None, " ".join(company), " ".join(spoken)).ratio() >= policy.NAME_MATCH_THRESHOLD:
+            return True
+        return all(max(SequenceMatcher(None, c, w).ratio() for w in spoken) >= policy.NAME_TOKEN_THRESHOLD
+                   for c in company)
 
     def invoice(self, number: str, customer_id: str) -> Invoice:
         row = self.conn.execute(

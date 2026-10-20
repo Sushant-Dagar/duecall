@@ -79,7 +79,7 @@ async def main() -> None:
         call_id = ledger.start_call(customer_id, version, "eval")
         return CallState(ledger=ledger, customer_id=customer_id, call_id=call_id, today=today, prompt_version=version)
 
-    scores, errors = [], []
+    scores, errors, transcripts = [], [], []
     for version in a.versions.split(","):
         for sc in chosen:
             for _ in range(a.repeats):
@@ -99,6 +99,7 @@ async def main() -> None:
                     print(f"{version:>3} {sc.id:<17} ERROR {type(e).__name__} (skipped; try a lower --rpm)")
                     continue
                 sc_score = score(t, sc)
+                transcripts.append(t)
                 if a.judge:
                     sc_score.judge, _ = await judge(sim_llm, t)
                 scores.append(sc_score)
@@ -117,8 +118,14 @@ async def main() -> None:
     tail = ("\n\nSkipped calls:\n" + "\n".join(f"- {e}" for e in errors)) if errors else ""
     (out / f"{stamp}.md").write_text(header + to_markdown(summary, scores) + tail + "\n", encoding="utf-8")
     (out / f"{stamp}.json").write_text(dump(scores), encoding="utf-8")
+    log = []
+    for t in transcripts:
+        log.append(f"## {t.version} / {t.scenario} -> {t.outcome}\n\ntools: {', '.join(t.tool_calls) or 'none'}\n")
+        log += [f"**{who}:** {text}  " for who, text in t.turns]
+        log.append("")
+    (out / f"{stamp}-transcripts.md").write_text("\n".join(log), encoding="utf-8")
     print("\n" + to_markdown(summary, scores) + tail)
-    print(f"\nsaved evals/results/{stamp}.md")
+    print(f"\nsaved evals/results/{stamp}.md and {stamp}-transcripts.md")
     os._exit(0)  # plugin HTTP sessions can keep the loop alive
 
 

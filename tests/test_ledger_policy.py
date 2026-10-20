@@ -9,11 +9,30 @@ from duecall.policy import PolicyIndex
 from .conftest import TODAY
 
 
-def test_identity_match_tolerates_speech_to_text_but_not_other_companies(ledger):
-    assert ledger.match_company("CUST-001", "Shri Ganesh Traders")
-    assert ledger.match_company("CUST-002", "nova retail private limited")
-    assert not ledger.match_company("CUST-001", "Nova Retail")
-    assert not ledger.match_company("CUST-999", "Shree Ganesh Traders")
+@pytest.mark.parametrize("cid,said", [
+    ("CUST-001", "Shri Ganesh Traders"),
+    ("CUST-001", "Sri Ganesh traders"),
+    ("CUST-001", "This is Rohit Mehta from Shri Ganesh Traders"),
+    ("CUST-001", "yes, Rohit here, Shree Ganesh Traders accounts"),
+    ("CUST-002", "nova retail private limited"),
+    ("CUST-002", "I'm Anjali from Nova Retail"),
+    ("CUST-003", "Daniel at Bluepeak Logistics"),
+])
+def test_identity_match_accepts_stt_variants_and_full_sentences(ledger, cid, said):
+    assert ledger.match_company(cid, said)
+
+
+@pytest.mark.parametrize("cid,said", [
+    ("CUST-001", "Nova Retail"),
+    ("CUST-001", "Ganesh Traders"),           # missing a word of the name
+    ("CUST-001", "Rohit Mehta"),               # a person, not the company
+    ("CUST-001", "Sikh and H traders"),        # mis-transcribed: ask again
+    ("CUST-002", "Sunrise Hardware"),
+    ("CUST-002", ""),
+    ("CUST-999", "Shree Ganesh Traders"),
+])
+def test_identity_match_rejects_other_names(ledger, cid, said):
+    assert not ledger.match_company(cid, said)
 
 
 def test_invoices_are_scoped_to_the_customer(ledger):
