@@ -57,6 +57,8 @@ async def main() -> None:
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--judge", action="store_true")
     p.add_argument("--sim-provider", default=None)
+    p.add_argument("--pause", type=float, default=0.0,
+                   help="seconds to wait before each customer turn (stay under free-tier rate limits)")
     a = p.parse_args()
 
     s = Settings()
@@ -78,8 +80,13 @@ async def main() -> None:
                 contact = Ledger(":memory:")
                 contact.seed_demo(today)
                 opening = prompts.opening_line(contact.customer(sc.customer_id).contact_name)
-                t = await run_call(sc, version, agent_llm, llm_customer(sim_llm, sc.persona), make_state,
-                                   opening=opening)
+                speak = llm_customer(sim_llm, sc.persona)
+
+                async def paced(turns, _speak=speak):
+                    await asyncio.sleep(a.pause)
+                    return await _speak(turns)
+
+                t = await run_call(sc, version, agent_llm, paced, make_state, opening=opening)
                 sc_score = score(t, sc)
                 if a.judge:
                     sc_score.judge, _ = await judge(sim_llm, t)
