@@ -142,8 +142,14 @@ def _speak_bare(token: str) -> str:
     return text
 
 
+_JSON_RE = re.compile(r"\{[^{}]*\}")
+_DASHES_RE = re.compile(r"[\u2010-\u2014]")
+
+
 def normalize_for_tts(text: str, *, currency: str = "INR", today: date | None = None) -> str:
-    """Safety net for LLM-written text: money, ISO dates, invoice refs, symbols, markdown."""
+    """Safety net for LLM-written text: JSON, money, ISO dates, invoice refs, symbols, markdown."""
+    text = _JSON_RE.sub("", text)          # a model writing tool args as text must never be read out
+    text = _DASHES_RE.sub("-", text)       # 'INV‑2041' with a non-breaking hyphen is still a reference
     text = _MARKDOWN_RE.sub("", text)
     text = _MONEY_RE.sub(lambda m: _money_sub(m, currency), text)
     text = _ISO_DATE_RE.sub(
@@ -157,7 +163,7 @@ def normalize_for_tts(text: str, *, currency: str = "INR", today: date | None = 
 
 def unspeakable_tokens(text: str) -> list[str]:
     """Tokens a TTS engine is likely to misread. Used by evals as a hard check."""
-    return re.findall(r"\d|[₹$%#@&*_`]|\b[A-Z]{2,5}-\d+", text)
+    return re.findall(r"\d|[₹$%#@&*_`{}|]|\b[A-Z]{2,5}[-\u2010-\u2014]\d+", text)
 
 
 class SentenceBuffer:

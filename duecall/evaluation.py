@@ -144,7 +144,7 @@ async def run_call(scenario: Scenario, version: str, agent_llm: llm.LLM, custome
     t = Transcript(scenario.id, version)
     if opening:
         t.turns.append(("agent", opening))
-    async with AgentSession(llm=agent_llm, userdata=state, max_tool_steps=4) as session:
+    async with AgentSession(llm=agent_llm, userdata=state, max_tool_steps=6) as session:
         await session.start(CollectionsAgent(state))
         for _ in range(max_turns):
             said = await customer(t.turns)
@@ -159,7 +159,7 @@ async def run_call(scenario: Scenario, version: str, agent_llm: llm.LLM, custome
                         t.verified_at_turn = len(t.turns)  # agent speech from here on may cite amounts
                 elif isinstance(ev, ChatMessageEvent) and ev.item.role == "assistant":
                     t.turns.append(("agent", ev.item.text_content or ""))
-            if "end_call" in t.tool_calls:
+            if "end_call" in t.tool_calls or state.closed:
                 break
     t.outcome = state.outcome
     t.disclosed = set(state.disclosed_amounts)
@@ -171,9 +171,12 @@ def llm_customer(model: llm.LLM, persona: str) -> Customer:
     async def speak(turns: list[tuple[str, str]]) -> str | None:
         ctx = llm.ChatContext.empty()
         ctx.add_message(role="system", content=(
-            "You are role-playing a business customer receiving a phone call about overdue invoices. "
-            f"Persona: {persona}\nReply with ONLY what you say out loud, one or two short sentences, as "
-            "transcribed speech (numbers in words). If the caller has said goodbye, reply exactly: <hangup>"))
+            "You are role-playing a business customer who has just answered an outbound phone call. The caller "
+            "works for Acme Supplies, a supplier your company buys from, and is calling about overdue invoices. "
+            "You do NOT work for Acme Supplies: when asked which company you are with, give YOUR company from "
+            f"the persona.\nPersona: {persona}\nReply with ONLY what you say out loud, one or two short sentences, "
+            "as transcribed speech (numbers in words). Only when the caller has clearly ended the call with a "
+            "goodbye, reply exactly: <hangup>"))
         for who, text in turns:
             ctx.add_message(role="user" if who == "agent" else "assistant", content=text)
         reply = (await model.chat(chat_ctx=ctx).collect()).text.strip()

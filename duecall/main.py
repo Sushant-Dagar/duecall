@@ -11,6 +11,7 @@ Outbound calls are dispatched by duecall.dialer with job metadata like
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from datetime import date
 
 from dotenv import load_dotenv
 from livekit import api
-from livekit.agents import AgentServer, AgentSession, JobContext, JobProcess, MetricsCollectedEvent, cli, inference, metrics
+from livekit.agents import AgentServer, AgentSession, AgentStateChangedEvent, JobContext, JobProcess, MetricsCollectedEvent, cli, inference, metrics
 # Plugins must be registered on the main thread at import time, not inside a job.
 from livekit.plugins import anthropic, cartesia, deepgram, google, openai, silero  # noqa: F401
 
@@ -75,7 +76,7 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata["vad"],
         turn_detection=inference.TurnDetector(),  # semantic end-of-turn: fewer cut-offs on "I'll pay on... the fifth"
         preemptive_generation=settings.preemptive,  # LLM starts on the interim transcript (lower latency)
-        max_tool_steps=4,
+        max_tool_steps=6,
         # Indian-English STT can finalise a beat late; wait a little longer before
         # committing the turn so "I am from ... Shree Ganesh" arrives as one message.
         min_endpointing_delay=0.6,
@@ -87,6 +88,18 @@ async def entrypoint(ctx: JobContext) -> None:
             ledger.end_call(call_id, "no_commitment")
 
     ctx.add_shutdown_callback(on_shutdown)
+
+    def on_state(ev: AgentStateChangedEvent) -> None:
+        # Once the call is closed and the goodbye has finished playing, hang up:
+        # deleting the room disconnects the SIP leg, so the phone line is released.
+        if state.closed and ev.old_state == "speaking" and ev.new_state == "listening":
+            asyncio.create_task(_hang_up())
+
+    async def _hang_up() -> None:
+        await ctx.delete_room()
+        ctx.shutdown(reason="call closed")
+
+    session.on("agent_state_changed", on_state)
 
     if phone:
         if not settings.sip_trunk_id:

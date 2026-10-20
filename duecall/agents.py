@@ -9,6 +9,7 @@ wrong place. All three share the same CallState, so nothing is lost on handoff.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
 from datetime import date
@@ -34,6 +35,7 @@ class CallState:
     verify_attempts: int = 0
     focus_invoice: str | None = None
     outcome: str | None = None
+    closed: bool = False  # set once the call is wrapped up; callers hang up after the goodbye
     # Every amount and date a tool disclosed on this call. The eval harness checks
     # the agent's speech against this set to catch hallucinated figures.
     disclosed_amounts: set[Decimal] = field(default_factory=set)
@@ -69,6 +71,22 @@ def _small(n: int) -> str:
 
 
 Ctx = RunContext[CallState]
+
+# The customer hears one voice throughout; a handoff must not sound like the call ending.
+_HANDOFF = ("Handoff done internally. You are the same person on the same call: do not mention a transfer, "
+            "a specialist, or say goodbye. Continue directly with the customer's request.")
+
+
+def _close(state: CallState, outcome: str) -> None:
+    if not state.closed:
+        state.ledger.end_call(state.call_id, outcome)
+    state.outcome, state.closed = outcome, True
+
+
+def _is_our_company(name: str) -> bool:
+    words = set(re.findall(r"[a-z]+", name.lower()))
+    ours = set(re.findall(r"[a-z]+", prompts.COMPANY.lower()))
+    return bool(ours) and ours <= words
 
 
 def _require_verified(state: CallState) -> None:
@@ -144,10 +162,8 @@ class _VoiceAgent(Agent):
     ) -> str:
         """Close the call with its outcome, after saying a short goodbye."""
         st = context.userdata
-        final = st.outcome or outcome
-        st.ledger.end_call(st.call_id, final)
-        st.outcome = final
-        return f"Call closed as {final}. Say a brief thank-you and goodbye; do not ask further questions."
+        _close(st, st.outcome or outcome)
+        return f"Call closed as {st.outcome}. Say a brief thank-you and goodbye; do not ask further questions."
 
 
 class CollectionsAgent(_VoiceAgent):
@@ -156,11 +172,22 @@ class CollectionsAgent(_VoiceAgent):
     role = "collections"
 
     @function_tool
-    async def verify_identity(self, context: Ctx, company_name: str) -> str:
-        """Verify the person by the company name they say they are calling from."""
+    async def verify_identity(
+        self, context: Ctx,
+        company_name: Annotated[str, Field(description=(
+            f"The company the person works for, as they said it. Not {prompts.COMPANY} (that is us) "
+            "and not a person's name."))],
+    ) -> str:
+        """Verify the person by the name of the company they work for."""
         st = context.userdata
         if st.verified:
             return "Already verified."
+        if st.closed:
+            return "Verification already failed and the call is closed. Say goodbye; do not call more tools."
+        if _is_our_company(company_name):
+            # Confusion, not a wrong answer: do not count it as a failed attempt.
+            return (f"{prompts.COMPANY} is our own company. Ask which company THEY work for, "
+                    "for example: 'And which company are you with?'")
         if st.ledger.match_company(st.customer_id, company_name):
             st.verified = True
             invoices = st.ledger.open_invoices(st.customer_id)
@@ -172,9 +199,10 @@ class CollectionsAgent(_VoiceAgent):
             return f"Verified. Open invoices: {lines}. Tell them about these and ask when they can pay."
         st.verify_attempts += 1
         if st.verify_attempts >= policy.MAX_VERIFY_ATTEMPTS:
-            st.outcome = "verification_failed"
-            return ("Verification failed twice. Do not share any account details. Say you will send the details "
-                    "by email to the address on file, then call end_call with verification_failed.")
+            # Closed in code: the model is not trusted to remember to end the call.
+            _close(st, "verification_failed")
+            return ("Verification failed and the call is closed. Do not share any account details. Say you will "
+                    "send the details to the email address on file, then say goodbye. Do not call more tools.")
         return "That company name does not match this account. Politely ask them to repeat the company name."
 
     @function_tool
@@ -203,14 +231,14 @@ class CollectionsAgent(_VoiceAgent):
         invoice_number like INV-2041; omit to use the invoice already discussed."""
         st = context.userdata
         self._focus(st, invoice_number)
-        return PaymentsAgent(st, chat_ctx=self.chat_ctx), "Transferring to payments."
+        return PaymentsAgent(st, chat_ctx=self.chat_ctx), _HANDOFF
 
     @function_tool
     async def transfer_to_disputes(self, context: Ctx, invoice_number: str | None = None):
         """Hand off to the disputes specialist when the customer disagrees with an invoice or says it is paid."""
         st = context.userdata
         self._focus(st, invoice_number)
-        return DisputesAgent(st, chat_ctx=self.chat_ctx), "Transferring to disputes."
+        return DisputesAgent(st, chat_ctx=self.chat_ctx), _HANDOFF
 
     @function_tool
     async def send_statement(self, context: Ctx) -> str:
@@ -234,7 +262,7 @@ class _Specialist(_VoiceAgent):
     @function_tool
     async def back_to_main(self, context: Ctx):
         """Return to the main agent for anything outside this specialist's job."""
-        return CollectionsAgent(context.userdata, chat_ctx=self.chat_ctx), "Back to the main agent."
+        return CollectionsAgent(context.userdata, chat_ctx=self.chat_ctx), _HANDOFF
 
 
 class PaymentsAgent(_Specialist):
