@@ -19,7 +19,8 @@ from datetime import date
 from dotenv import load_dotenv
 from livekit import api
 from livekit.agents import AgentServer, AgentSession, JobContext, JobProcess, MetricsCollectedEvent, cli, inference, metrics
-from livekit.plugins import silero
+# Plugins must be registered on the main thread at import time, not inside a job.
+from livekit.plugins import anthropic, cartesia, deepgram, google, openai, silero  # noqa: F401
 
 from . import prompts
 from .agents import CallState, CollectionsAgent
@@ -73,8 +74,11 @@ async def entrypoint(ctx: JobContext) -> None:
         tts=make_tts(settings),
         vad=ctx.proc.userdata["vad"],
         turn_detection=inference.TurnDetector(),  # semantic end-of-turn: fewer cut-offs on "I'll pay on... the fifth"
-        preemptive_generation=True,          # start the LLM on the interim transcript to cut response latency
+        preemptive_generation=settings.preemptive,  # LLM starts on the interim transcript (lower latency)
         max_tool_steps=4,
+        # Indian-English STT can finalise a beat late; wait a little longer before
+        # committing the turn so "I am from ... Shree Ganesh" arrives as one message.
+        min_endpointing_delay=0.6,
     )
     session.on("metrics_collected", lambda ev: _record_latency(state, ev))
 
