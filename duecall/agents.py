@@ -58,7 +58,10 @@ class CallState:
             status = f"{_small(overdue)} day{'s' if overdue != 1 else ''} overdue"
         else:
             status = f"due on {self.day(inv.due_date)}"
-        return f"invoice {speak_reference(inv.number)}, balance {self.amount(inv.balance)}, {status}"
+        # The spoken form is for the customer; the "tool value" is the exact number the
+        # model passes back to tools, so it never has to convert words to digits itself.
+        return (f"invoice {speak_reference(inv.number)} (tool value {inv.number}), balance "
+                f"{self.amount(inv.balance)} (tool value {inv.balance}), {status}")
 
 
 def _small(n: int) -> str:
@@ -240,17 +243,20 @@ class PaymentsAgent(_Specialist):
     @function_tool
     async def record_promise_to_pay(
         self, context: Ctx,
-        amount: Annotated[float, Field(description="Amount the customer committed to, as a number")],
         payment_date: Annotated[str, Field(description="Date as YYYY-MM-DD")],
+        amount: Annotated[float | None, Field(
+            description="Amount as a number, e.g. the balance's tool value. Omit to promise the full balance.")] = None,
     ) -> str:
         """Save the customer's confirmed promise to pay. Only call after reading it back and getting a yes."""
         st = context.userdata
         inv = self._inv(st)
-        amt, on = _parse_amount(amount), _parse_date(payment_date, st)
+        amt = inv.balance if amount is None else _parse_amount(amount)
+        on = _parse_date(payment_date, st)
         try:
             st.ledger.record_promise(st.call_id, inv, amt, on, st.today)
         except LedgerError as e:
-            raise ToolError(str(e)) from None
+            raise ToolError(f"{e} The balance is {speak_amount(inv.balance, st.currency)} "
+                            f"(tool value {inv.balance}); omit amount for the full balance.") from None
         st.outcome = "promise_to_pay"
         left = inv.balance - amt
         tail = f" A balance of {st.amount(left)} will remain." if left > 0 else ""

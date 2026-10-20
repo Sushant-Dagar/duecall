@@ -58,6 +58,7 @@ The model answers policy questions (late fees, payment methods, plans, disputes,
 
 ```bash
 python -m evals.run_eval --versions v1,v2 --repeats 3 --judge
+python -m evals.run_eval --versions v1,v2 --rpm 5   # pace requests on a free-tier key
 ```
 
 Results are written to `evals/results/` with each prompt version's content hash, so a score always maps back to the exact prompt text. The dialer can also alternate prompt versions across live calls (`--ab v1,v2`), and the dashboard reports commitment rate per version.
@@ -93,7 +94,7 @@ The worker keeps a websocket open to LiveKit and must not be CPU-throttled, so t
 
 ## Tests
 
-41 offline tests (`pytest -q`, about a second). The conversation tests run the real LiveKit `AgentSession`, tool execution and agent handoffs with a scripted stand-in LLM (`scripted_llm.py`), so CI checks the call flow and every guardrail without API keys. Model quality is measured separately by the eval harness.
+44 offline tests (`pytest -q`, about a second). The conversation tests run the real LiveKit `AgentSession`, tool execution and agent handoffs with a scripted stand-in LLM (`scripted_llm.py`), so CI checks the call flow and every guardrail without API keys. Model quality is measured separately by the eval harness.
 
 ## Layout
 

@@ -160,3 +160,27 @@ async def test_policy_tool_is_grounded(make_state):
         await session.start(CollectionsAgent(state))
         r = await session.run(user_input="Is there a late fee?")
     assert outputs(r)[0].output.startswith("[late-fees]")
+
+
+async def test_promise_without_amount_means_full_balance_and_errors_give_the_number(make_state, ledger):
+    """Models are bad at turning 'one lakh twenty-four thousand...' back into digits, so tools
+    expose the exact number and a full-balance promise needs no amount at all."""
+    state = make_state("CUST-001")
+    on = (TODAY + timedelta(days=4)).isoformat()
+    model = ScriptedLLM([
+        ("tool", "verify_identity", {"company_name": "Shree Ganesh Traders"}), ("say", "ok"),
+        ("tool", "transfer_to_payments", {}), ("say", "ok"),
+        ("tool", "record_promise_to_pay", {"amount": 12450050, "payment_date": on}), ("say", "Let me fix that."),
+        ("tool", "record_promise_to_pay", {"payment_date": on}), ("say", "Saved."),
+    ])
+    async with AgentSession(llm=model, userdata=state) as session:
+        await session.start(CollectionsAgent(state))
+        r0 = await session.run(user_input="Shree Ganesh Traders")
+        assert "tool value 124500.50" in outputs(r0)[0].output
+        await session.run(user_input="Full amount")
+        r1 = await session.run(user_input="Yes")
+        r2 = await session.run(user_input="Yes, the full amount")
+    assert outputs(r1)[0].is_error and "tool value 124500.50" in outputs(r1)[0].output
+    assert not outputs(r2)[0].is_error
+    row = ledger.conn.execute("SELECT amount FROM promises").fetchone()
+    assert Decimal(row["amount"]) == Decimal("124500.50")

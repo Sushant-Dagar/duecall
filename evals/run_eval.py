@@ -23,6 +23,7 @@ from duecall.agents import CallState
 from duecall.config import Settings, make_llm
 from duecall.evaluation import Scenario, dump, judge, llm_customer, run_call, score, summarize, to_markdown
 from duecall.ledger import Ledger
+from duecall.throttle import Limiter, ThrottledLLM
 
 SCENARIOS = [
     Scenario("cooperative", "CUST-001",
@@ -58,12 +59,17 @@ async def main() -> None:
     p.add_argument("--judge", action="store_true")
     p.add_argument("--sim-provider", default=None)
     p.add_argument("--pause", type=float, default=0.0,
-                   help="seconds to wait before each customer turn (stay under free-tier rate limits)")
+                   help="seconds to wait before each customer turn")
+    p.add_argument("--rpm", type=float, default=0.0,
+                   help="max LLM requests per minute across agent + customer + judge (free tier: try 5)")
     a = p.parse_args()
 
     s = Settings()
     agent_llm = make_llm(s)
     sim_llm = make_llm(replace(s, llm_provider=a.sim_provider, llm_model=None) if a.sim_provider else s)
+    if a.rpm:
+        limiter = Limiter(a.rpm)  # shared, so agent and customer together stay under the cap
+        agent_llm, sim_llm = ThrottledLLM(agent_llm, limiter), ThrottledLLM(sim_llm, limiter)
     chosen = SCENARIOS if a.scenarios == "all" else [x for x in SCENARIOS if x.id in a.scenarios.split(",")]
     today = date.today()
 
@@ -73,7 +79,7 @@ async def main() -> None:
         call_id = ledger.start_call(customer_id, version, "eval")
         return CallState(ledger=ledger, customer_id=customer_id, call_id=call_id, today=today, prompt_version=version)
 
-    scores = []
+    scores, errors = [], []
     for version in a.versions.split(","):
         for sc in chosen:
             for _ in range(a.repeats):
@@ -86,7 +92,12 @@ async def main() -> None:
                     await asyncio.sleep(a.pause)
                     return await _speak(turns)
 
-                t = await run_call(sc, version, agent_llm, paced, make_state, opening=opening)
+                try:
+                    t = await run_call(sc, version, agent_llm, paced, make_state, opening=opening)
+                except Exception as e:  # one failed call (e.g. rate limit) must not sink the run
+                    errors.append(f"{version} {sc.id}: {type(e).__name__}: {str(e)[:160]}")
+                    print(f"{version:>3} {sc.id:<17} ERROR {type(e).__name__} (skipped; try a lower --rpm)")
+                    continue
                 sc_score = score(t, sc)
                 if a.judge:
                     sc_score.judge, _ = await judge(sim_llm, t)
@@ -94,15 +105,19 @@ async def main() -> None:
                 print(f"{version:>3} {sc.id:<17} outcome={t.outcome} ok={sc_score.outcome_ok} "
                       f"halluc={len(sc_score.hallucinations)} tts={len(sc_score.tts_violations)}")
 
+    if not scores:
+        print("No call completed.", *errors, sep="\n")
+        os._exit(1)
     summary = summarize(scores)
     out = Path(__file__).parent / "results"
     out.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     header = (f"# Eval {stamp}\n\nmodel: {s.llm_provider}/{s.llm_model or 'default'}; "
               + ", ".join(f"{v}@{prompts.fingerprint(v)}" for v in a.versions.split(",")) + "\n\n")
-    (out / f"{stamp}.md").write_text(header + to_markdown(summary, scores) + "\n")
-    (out / f"{stamp}.json").write_text(dump(scores))
-    print("\n" + to_markdown(summary, scores))
+    tail = ("\n\nSkipped calls:\n" + "\n".join(f"- {e}" for e in errors)) if errors else ""
+    (out / f"{stamp}.md").write_text(header + to_markdown(summary, scores) + tail + "\n", encoding="utf-8")
+    (out / f"{stamp}.json").write_text(dump(scores), encoding="utf-8")
+    print("\n" + to_markdown(summary, scores) + tail)
     print(f"\nsaved evals/results/{stamp}.md")
     os._exit(0)  # plugin HTTP sessions can keep the loop alive
 
